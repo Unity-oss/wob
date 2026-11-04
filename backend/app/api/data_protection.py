@@ -17,11 +17,11 @@ from app.security.auth import Admin, Coordinator, CurrentUser, Exporter
 from app.services import audit, consent
 from app.services.http import attachment
 from app.services.purge import purge_finalist
-from app.services.storage import LocalStorage, get_storage
+from app.services.storage import FileStorage, get_storage
 from app.services.subject_export import build_export
 
 router = APIRouter(prefix="/api/v1", tags=["data protection"])
-StorageDep = Annotated[LocalStorage, Depends(get_storage)]
+StorageDep = Annotated[FileStorage, Depends(get_storage)]
 
 
 class ConsentIn(BaseModel):

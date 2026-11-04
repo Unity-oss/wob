@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AwardCategory, FinalistCategory, User
 from app.services import audit
-from app.services.storage import LocalStorage
+from app.services.storage import FileStorage
 
 # (table, column) deletions, in foreign-key order, keyed on ids gathered first.
 _STEPS = [
@@ -73,7 +73,7 @@ _GATHER = {
 
 def purge_finalist(
     session: Session,
-    storage: LocalStorage,
+    storage: FileStorage,
     finalist_category_id: uuid.UUID,
     actor: User | None,
     reason: str,
@@ -144,7 +144,7 @@ def purge_finalist(
 
 def purge_category(
     session: Session,
-    storage: LocalStorage,
+    storage: FileStorage,
     category_id: uuid.UUID,
     actor: User | None,
     reason: str,
@@ -248,7 +248,7 @@ def deletion_blockers(session: Session, category_id: uuid.UUID) -> list[str]:
 
 def delete_category(
     session: Session,
-    storage: LocalStorage,
+    storage: FileStorage,
     category_id: uuid.UUID,
     actor: User | None,
     reason: str,
@@ -298,7 +298,7 @@ def delete_category(
 
 
 def purge_expired(
-    session: Session, storage: LocalStorage, today: date | None = None
+    session: Session, storage: FileStorage, today: date | None = None
 ) -> dict[str, dict[str, int]]:
     """Purge every category whose retention date has passed (s.18(4)). Run daily."""
     today = today or datetime.now(UTC).date()

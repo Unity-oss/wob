@@ -37,7 +37,7 @@ from app.models import (
     User,
     VerificationReview,
 )
-from app.services.storage import LocalStorage
+from app.services.storage import FileStorage
 
 README = """Personal data held about you by the Women on Boards Awards 2026 evidence system
 
@@ -67,7 +67,7 @@ def _iso(value: Any) -> Any:
 
 
 def build_export(
-    session: Session, storage: LocalStorage, finalist_category_id: uuid.UUID
+    session: Session, storage: FileStorage, finalist_category_id: uuid.UUID
 ) -> tuple[bytes, str]:
     fc = session.get_one(FinalistCategory, finalist_category_id)
     finalist = session.get_one(Finalist, fc.finalist_id)

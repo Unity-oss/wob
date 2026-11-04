@@ -28,7 +28,7 @@ from app.config import Settings
 from app.models import AwardCategory, Document, Finalist, FinalistCategory, SourceType, User
 from app.services import audit, consent
 from app.services.documents import Upload, store_uploads
-from app.services.storage import LocalStorage
+from app.services.storage import FileStorage
 
 # Columns that are personal contact data or not evidence.
 EXCLUDED = re.compile(r"e-?mail|phone|mobile|date of birth|^declaration$|^timestamp$", re.I)
@@ -282,7 +282,7 @@ def plan_import(
 
 
 def apply_import(
-    session: Session, storage: LocalStorage, settings: Settings, plan: Plan, user: User
+    session: Session, storage: FileStorage, settings: Settings, plan: Plan, user: User
 ) -> list[Planned]:
     """Store a document for each matched nominee not imported before, and fill in their
     organisation and title where the system has none. Returns what was imported."""
