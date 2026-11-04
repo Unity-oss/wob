@@ -49,6 +49,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-wob}
       POSTGRES_USER: ${POSTGRES_USER:-wob}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    ports:
+      # Loopback only: reachable solely via the dbtunnel SSH-forward user, never the public
+      # internet. Lets the Hugging Face deployment reach this database over an SSH tunnel.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ../docker/initdb:/docker-entrypoint-initdb.d:ro
