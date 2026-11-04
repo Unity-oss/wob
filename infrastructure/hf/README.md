@@ -109,7 +109,9 @@ SHA, or override both as Space build args.
 - `R2Storage` (the code) has unit tests against a fake S3 client but hasn't been exercised
   against a real R2 bucket inside this app end-to-end -- only the one-off raw-byte migration of
   existing files has been verified against the real bucket.
-- No smoke test of the full combined container has been run yet (build + boot + login + upload).
+- Smoke-tested: the Space builds, boots, `/api/v1/health` returns `{"status":"ok","database":"ok",
+  "pgvector":"0.8.6"}`, and `/login` renders. Not yet tested: actually signing in, uploading a
+  document, or any AI-processing path end-to-end.
 - AI-Postgre's port 5432 being open to the public internet (see above) predates this migration
   and affects other projects on that droplet too -- worth a deliberate fix (Cloud Firewall rule
   scoped to Hugging Face's egress, or moving this specific database behind its own auth proxy),
