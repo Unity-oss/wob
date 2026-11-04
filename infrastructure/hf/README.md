@@ -24,6 +24,26 @@ the two things that need to survive restarts outside the Space entirely:
 
 Caddy is dropped: the Space's own edge terminates TLS, so there's nothing for it to do here.
 
+## A real gap this surfaced: deployed code isn't all in git
+
+The droplet's deploy flow (`infrastructure/deployment/deploy.sh`) builds images locally and ships
+them directly (`docker build` -> `docker save | ssh ... | docker load`); it never pushes source
+anywhere. Building this Space from `main` failed alembic migrations (`Can't locate revision
+identified by '0021'`) because the repo stopped at migration 0013 while the running database was
+on 0021. Pulling the real source out of the running containers (`docker cp`) turned up most of
+`backend/app/` and the `judges-pack`/`judges-scores` frontend routes, none of it committed
+anywhere -- judging, role permissions, rating scales, form import, AI cost tracking, LangSmith
+tracing. That gap is fixed for the backend (this branch now matches the real running source, see
+its commit history), but **the frontend can't be fixed the same way**: the production frontend
+image only ships the compiled `.next` output, not the `.tsx` source that produced it, and that
+source does not exist in this repo. `frontend-dist/.next` in this directory is the real compiled
+build, pulled once from the running `wob-web-1` container, used as-is below instead of rebuilding
+from the (incomplete) checked-in frontend source -- it is not committed to this repo (a 43MB
+binary build artifact doesn't belong in source control; `.next/` is already gitignored) and needs
+rebuilding from here whenever the frontend changes, same as `infrastructure/hf/Dockerfile` itself.
+The actual current frontend source most likely only exists on whichever machine last ran
+`deploy.sh` -- probably worth finding and committing before this gap causes a real problem.
+
 ## Required secrets (Space settings -> Variables and secrets)
 
 | Name | Value |
@@ -48,8 +68,17 @@ to its root:
 ```
 git clone https://huggingface.co/spaces/<org>/<name> wob-space
 cp infrastructure/hf/{Dockerfile,clamd.conf,freshclam.conf,supervisord.conf,db-tunnel.sh,wait-for.sh} wob-space/
+cp -r infrastructure/hf/frontend-dist wob-space/
 cp infrastructure/hf/SPACE_README.md wob-space/README.md
 cd wob-space && git add -A && git commit -m "Deploy" && git push
+```
+
+`frontend-dist/` is not part of this repo (see above) -- it has to be regenerated from the live
+container whenever the frontend changes:
+
+```
+docker exec wob-web-1 tar -czf - -C /app .next > frontend-next.tar.gz   # on the droplet
+mkdir -p infrastructure/hf/frontend-dist && tar -xzf frontend-next.tar.gz -C infrastructure/hf/frontend-dist
 ```
 
 The `Dockerfile` pulls the actual application source (`backend/`, `frontend/`) from
@@ -67,3 +96,6 @@ the `ARG SOURCE_REPO`/`ARG SOURCE_REF` defaults at the top of `Dockerfile` to
 - No smoke test of the full combined container has been run yet (build + boot + login + upload).
 - If the droplet is ever decommissioned, the database needs to move somewhere durable first (a
   managed Postgres with pgvector) -- this setup assumes it keeps running.
+- The real frontend source (see above) needs to be found and committed; until then,
+  `frontend-dist/.next` is a snapshot that silently goes stale the next time anyone changes the
+  frontend and deploys it to the droplet without also regenerating this directory.

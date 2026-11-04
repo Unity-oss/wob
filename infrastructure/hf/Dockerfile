@@ -14,15 +14,6 @@ ARG SOURCE_REPO
 ARG SOURCE_REF
 RUN git clone --depth 1 --branch "$SOURCE_REF" "$SOURCE_REPO" /src
 
-FROM node:22.20.0-alpine AS frontend-build
-WORKDIR /app
-COPY --from=source /src/frontend/package.json /src/frontend/package-lock.json ./
-RUN npm ci
-COPY --from=source /src/frontend .
-ENV NEXT_TELEMETRY_DISABLED=1
-# Default API_URL (127.0.0.1:8000, see next.config.ts) is already correct for one container.
-RUN npm run build
-
 FROM python:3.12-slim AS backend-deps
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
@@ -66,10 +57,14 @@ COPY --from=backend-deps /opt/tiktoken /opt/tiktoken
 COPY --from=source /src/backend /app/backend
 
 WORKDIR /app/frontend
-COPY --from=frontend-build /app/package.json /app/package-lock.json ./
+COPY --from=source /src/frontend/package.json /src/frontend/package-lock.json /src/frontend/next.config.ts ./
 RUN npm ci --omit=dev && npm cache clean --force
-COPY --from=frontend-build /app/.next ./.next
-COPY --from=frontend-build /app/next.config.ts ./
+# frontend-dist/.next is the real compiled build pulled from the running wob-web-1 container
+# (docker cp), not built from SOURCE_REPO here: that repo's frontend/app/ is missing routes
+# (judges-pack, judges-scores) added after the last commit that reached it -- see README.md.
+# It isn't committed to the application repo (a 43MB binary build artifact doesn't belong in
+# source control); it's uploaded straight to this Space, alongside this Dockerfile.
+COPY frontend-dist/.next ./.next
 
 # These support files live alongside this Dockerfile at the build context root: inside this repo
 # that's infrastructure/hf/, but the actual HF Space has its own separate git repo with this
