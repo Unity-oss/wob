@@ -1,6 +1,9 @@
 # Production stack for a single server: Caddy (HTTPS) -> Next.js -> FastAPI, plus the worker,
 # PostgreSQL/pgvector and ClamAV. Only Caddy is reachable from outside (ports 80/443).
 # Secrets come from .env next to this file (see deploy.sh); it never goes in the repository.
+# The wob-backend and wob-web images are built and shipped by deploy.sh, never built here.
+# Every service has a memory cap (MEM_* in the env file), so one that runs away is killed and
+# restarted instead of starving the whole server.
 name: wob
 
 x-backend-env: &backend-env
@@ -25,6 +28,12 @@ x-backend-env: &backend-env
   RESEARCH_MODEL: ${RESEARCH_MODEL:-claude-haiku-5-5}
   RESEARCH_EFFORT: ${RESEARCH_EFFORT:-medium}
   UPLOAD_REQUIRES_CONSENT: ${UPLOAD_REQUIRES_CONSENT:-false}
+  JURY_VERIFIES_SUPPORTING_DOCUMENTS: ${JURY_VERIFIES_SUPPORTING_DOCUMENTS:-true}
+  # LangSmith tracing, metadata only (app/services/tracing.py).
+  LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+  LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+  LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-wob-awards-2026}
+  LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
 
 x-logging: &logging
   driver: json-file
@@ -34,6 +43,7 @@ services:
   db:
     image: pgvector/pgvector:0.8.0-pg17
     restart: unless-stopped
+    mem_limit: ${MEM_DB:-768m}
     logging: *logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-wob}
@@ -49,8 +59,9 @@ services:
       retries: 20
 
   api:
-    build: ../../backend
+    image: wob-backend:latest
     restart: unless-stopped
+    mem_limit: ${MEM_API:-1536m}
     logging: *logging
     environment:
       <<: *backend-env
@@ -76,8 +87,9 @@ services:
         condition: service_healthy
 
   worker:
-    build: ../../backend
+    image: wob-backend:latest
     restart: unless-stopped
+    mem_limit: ${MEM_WORKER:-1536m}
     logging: *logging
     command: ["python", "-m", "app.workers.main"]
     environment:
@@ -96,8 +108,11 @@ services:
   clamav:
     image: clamav/clamav:1.4.6
     restart: unless-stopped
+    mem_limit: ${MEM_CLAMAV:-1536m}
     logging: *logging
     environment:
+      # Reloading signatures alongside the old set briefly doubles clamd's memory past its cap.
+      CLAMD_CONF_ConcurrentDatabaseReload: "no"
       CLAMD_CONF_StreamMaxLength: 60M
       CLAMD_CONF_MaxFileSize: 60M
       CLAMD_CONF_MaxScanSize: 200M
@@ -105,17 +120,16 @@ services:
       - clamav-db:/var/lib/clamav
 
   web:
-    build:
-      context: ../../frontend
-      args:
-        API_URL: http://api:8000
+    image: wob-web:latest
     restart: unless-stopped
+    mem_limit: ${MEM_WEB:-384m}
     logging: *logging
     depends_on: [api]
 
   caddy:
     image: caddy:2.10.2-alpine
     restart: unless-stopped
+    mem_limit: ${MEM_CADDY:-128m}
     logging: *logging
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS}
