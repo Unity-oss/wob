@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AwardCategory, FinalistCategory, User
 from app.services import audit
-from app.services.storage import FileStorage
+from app.services.storage import LocalStorage
 
 # (table, column) deletions, in foreign-key order, keyed on ids gathered first.
 _STEPS = [
@@ -43,6 +43,8 @@ _STEPS = [
     ("documents", "id", "documents"),
     ("imports", "id", "imports"),
     ("finalist_consents", "id", "finalist_consents"),
+    ("reference_notes", "id", "reference_notes"),
+    ("judge_scores", "id", "judge_scores"),
 ]
 
 _BY_FINALIST = [
@@ -56,6 +58,8 @@ _BY_FINALIST = [
     "documents",
     "imports",
     "finalist_consents",
+    "reference_notes",
+    "judge_scores",
 ]
 _GATHER = {
     table: f"SELECT id FROM {table} WHERE finalist_category_id = :fc"  # noqa: S608 (fixed names)
@@ -69,7 +73,7 @@ _GATHER = {
 
 def purge_finalist(
     session: Session,
-    storage: FileStorage,
+    storage: LocalStorage,
     finalist_category_id: uuid.UUID,
     actor: User | None,
     reason: str,
@@ -140,7 +144,7 @@ def purge_finalist(
 
 def purge_category(
     session: Session,
-    storage: FileStorage,
+    storage: LocalStorage,
     category_id: uuid.UUID,
     actor: User | None,
     reason: str,
@@ -158,8 +162,143 @@ def purge_category(
     return totals
 
 
+# Category-level rows left after every finalist is purged, in foreign-key order.
+_CATEGORY_STEPS = [
+    (
+        "calibration_ratings",
+        "item_id IN (SELECT i.id FROM calibration_items i "
+        "JOIN calibration_studies s ON s.id = i.study_id WHERE s.category_id = :c)",
+    ),
+    (
+        "calibration_items",
+        "study_id IN (SELECT id FROM calibration_studies WHERE category_id = :c)",
+    ),
+    (
+        "calibration_raters",
+        "study_id IN (SELECT id FROM calibration_studies WHERE category_id = :c)",
+    ),
+    ("calibration_studies", "category_id = :c"),
+    (
+        "assessment_citations",
+        "criterion_assessment_id IN (SELECT a.id FROM criterion_assessments a "
+        "JOIN assessment_runs r ON r.id = a.run_id WHERE r.category_id = :c)",
+    ),
+    ("criterion_assessments", "run_id IN (SELECT id FROM assessment_runs WHERE category_id = :c)"),
+    ("reports", "category_id = :c"),
+    ("ranking_entries", "snapshot_id IN (SELECT id FROM ranking_snapshots WHERE category_id = :c)"),
+    ("ranking_snapshots", "category_id = :c"),
+    ("assessment_runs", "category_id = :c"),
+    (
+        "rubric_criteria",
+        "rubric_version_id IN (SELECT id FROM rubric_versions WHERE category_id = :c)",
+    ),
+    ("rubric_versions", "category_id = :c"),
+    ("award_categories", "id = :c"),
+]
+
+
+def category_summary(session: Session, category_id: uuid.UUID) -> dict[str, int]:
+    """What deleting the category would remove, for a preview."""
+    counts = {
+        table: session.scalar(
+            text(f"SELECT count(*) FROM {table} WHERE {where}"),  # noqa: S608 (fixed names)
+            {"c": category_id},
+        )
+        for table, where in _CATEGORY_STEPS
+        if table != "award_categories"
+    }
+    counts["finalists"] = session.scalar(
+        text("SELECT count(*) FROM finalist_categories WHERE category_id = :c"), {"c": category_id}
+    )
+    counts["documents"] = session.scalar(
+        text(
+            "SELECT count(*) FROM documents d JOIN finalist_categories fc "
+            "ON fc.id = d.finalist_category_id WHERE fc.category_id = :c"
+        ),
+        {"c": category_id},
+    )
+    return counts
+
+
+def deletion_blockers(session: Session, category_id: uuid.UUID) -> list[str]:
+    """Records the database protects from deletion; the category can't be deleted while any
+    exist. Checked before anything is removed."""
+    blockers = [
+        f"rubric version {version} is {status}"
+        for version, status in session.execute(
+            text(
+                "SELECT version, status FROM rubric_versions "
+                "WHERE category_id = :c AND status <> 'draft' ORDER BY version"
+            ),
+            {"c": category_id},
+        )
+    ]
+    blockers += [
+        f"calibration study '{name}' is {status}"
+        for name, status in session.execute(
+            text(
+                "SELECT name, status FROM calibration_studies "
+                "WHERE category_id = :c AND status <> 'open' ORDER BY created_at"
+            ),
+            {"c": category_id},
+        )
+    ]
+    return blockers
+
+
+def delete_category(
+    session: Session,
+    storage: LocalStorage,
+    category_id: uuid.UUID,
+    actor: User | None,
+    reason: str,
+) -> dict[str, int]:
+    """Delete a whole category: every finalist's data (purged as above), then its calibration
+    studies, assessments, rankings, reports, draft rubrics and the category itself. Refuses,
+    before removing anything, if the database protects any of its records."""
+    category = session.get(AwardCategory, category_id)
+    if category is None:
+        raise LookupError("category not found")
+    blockers = deletion_blockers(session, category_id)
+    if blockers:
+        raise PermissionError("; ".join(blockers))
+    name, code = category.name, category.code
+    totals = purge_category(session, storage, category_id, actor, reason)
+
+    session.execute(text("SET LOCAL wob.purge = 'on'"))
+    params = {"c": category_id}
+    report_keys = list(
+        session.scalars(
+            text(
+                "SELECT storage_key FROM reports WHERE category_id = :c AND storage_key IS NOT NULL"
+            ),
+            params,
+        )
+    )
+    for table, where in _CATEGORY_STEPS:
+        result = session.execute(text(f"DELETE FROM {table} WHERE {where}"), params)  # noqa: S608
+        totals[table] = totals.get(table, 0) + result.rowcount
+    audit.record(
+        session,
+        actor,
+        "category.deleted",
+        "award_category",
+        category_id,
+        code=code,
+        name=name,
+        reason=reason,
+        counts=totals,
+    )
+    session.commit()
+
+    for key in report_keys:
+        storage.delete(key)
+    totals["files_shredded"] = totals.get("files_shredded", 0) + len(report_keys)
+    return totals
+
+
 def purge_expired(
-    session: Session, storage: FileStorage, today: date | None = None
+    session: Session, storage: LocalStorage, today: date | None = None
 ) -> dict[str, dict[str, int]]:
     """Purge every category whose retention date has passed (s.18(4)). Run daily."""
     today = today or datetime.now(UTC).date()

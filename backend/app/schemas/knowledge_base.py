@@ -21,8 +21,13 @@ class CategoryOut(BaseModel):
     code: str
     name: str
     description: str | None
+    hidden_at: datetime | None = None
     finalist_count: int = 0
     document_count: int = 0
+
+
+class CategoryVisibilityIn(BaseModel):
+    hidden: bool
 
 
 class FinalistCreate(BaseModel):
@@ -140,3 +145,23 @@ class CitationCheckOut(BaseModel):
     document_id: uuid.UUID | None
     filename: str | None
     page_number: int | None
+
+
+MAX_REFERENCE_NOTES = 4
+
+
+class ReferenceNoteIn(BaseModel):
+    referee_name: str = Field(min_length=1, max_length=200)
+    notes: str = Field(min_length=1, max_length=8000)
+
+
+class ReferenceNotesIn(BaseModel):
+    notes: list[ReferenceNoteIn] = Field(max_length=MAX_REFERENCE_NOTES)
+
+
+class ReferenceNoteOut(BaseModel):
+    position: int
+    referee_name: str
+    notes: str
+    updated_at: datetime
+    updated_by: str | None

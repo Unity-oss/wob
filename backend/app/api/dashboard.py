@@ -14,6 +14,7 @@ from app.schemas.knowledge_base import DocumentOut
 from app.security.auth import CurrentUser
 from app.services.calibration import is_blinded
 from app.services.ranking import display
+from app.services.scales import scale_of
 
 router = APIRouter(prefix="/api/v1", tags=["dashboard"])
 
@@ -46,6 +47,7 @@ class TopRanked(BaseModel):
     rank: int | None
     is_tie: bool
     score_display: str | None
+    scale_high: int
     strengths: list[str]
     production: bool
 
@@ -71,6 +73,7 @@ _CATEGORIES = text("""
              WHERE fc.category_id = c.id AND d.withdrawn_at IS NULL) AS documents,
            EXISTS (SELECT 1 FROM ranking_snapshots s WHERE s.category_id = c.id) AS ranked
       FROM award_categories c
+     WHERE c.hidden_at IS NULL
      ORDER BY c.name
 """)
 
@@ -94,6 +97,7 @@ _PROGRESS = text("""
       count(*) FILTER (WHERE claims.total > 0 AND claims.reviewed = claims.total)
           AS claims_verified
     FROM finalist_categories fc
+    JOIN award_categories c ON c.id = fc.category_id AND c.hidden_at IS NULL
     CROSS JOIN LATERAL (
         SELECT count(*) FILTER (WHERE d.withdrawn_at IS NULL) AS active,
                count(*) FILTER (WHERE d.withdrawn_at IS NULL AND d.processing_status
@@ -116,10 +120,11 @@ _LATEST_ENTRIES = text("""
          ORDER BY category_id, created_at DESC
     )
     SELECT l.category_id, c.name AS category_name, l.rubric_version_id, l.rubric_status,
+           (SELECT scale FROM rubric_versions v WHERE v.id = l.rubric_version_id) AS scale,
            f.id AS finalist_id, f.full_name, f.organisation,
            e.rank, e.is_tie, e.score, e.criterion_ratings
       FROM latest l
-      JOIN award_categories c ON c.id = l.category_id
+      JOIN award_categories c ON c.id = l.category_id AND c.hidden_at IS NULL
       JOIN ranking_entries e ON e.snapshot_id = l.id
       JOIN finalist_categories fc ON fc.id = e.finalist_category_id
       JOIN finalists f ON f.id = fc.finalist_id
@@ -145,8 +150,14 @@ def dashboard(session: SessionDep, user: CurrentUser) -> DashboardOut:
     entries.sort(key=lambda r: r["score"], reverse=True)
     top = []
     for r in entries[:TOP_RANKED]:
+        scale = scale_of(r["scale"])
+        # Strengths: the scale's top two levels (4-5 on 1-5, Good and Excellent on 0-3).
         ratings = sorted(
-            ((v, k) for k, v in (r["criterion_ratings"] or {}).items() if v is not None and v >= 4),
+            (
+                (v, k)
+                for k, v in (r["criterion_ratings"] or {}).items()
+                if v is not None and v >= scale.high - 1
+            ),
             reverse=True,
         )
         top.append(
@@ -159,6 +170,7 @@ def dashboard(session: SessionDep, user: CurrentUser) -> DashboardOut:
                 rank=r["rank"],
                 is_tie=r["is_tie"],
                 score_display=display(r["score"]),
+                scale_high=scale.high,
                 strengths=[
                     names.get((r["rubric_version_id"], k), k) for _, k in ratings[:STRENGTHS]
                 ],
@@ -235,7 +247,8 @@ def library(
     base = (
         "FROM documents d JOIN finalist_categories fc ON fc.id = d.finalist_category_id "
         "JOIN finalists f ON f.id = fc.finalist_id "
-        "JOIN award_categories c ON c.id = fc.category_id WHERE " + " AND ".join(where)
+        "JOIN award_categories c ON c.id = fc.category_id AND c.hidden_at IS NULL "
+        "WHERE " + " AND ".join(where)
     )
     total = session.scalar(text(f"SELECT count(*) {base}"), params) or 0  # noqa: S608
     rows = session.execute(

@@ -18,6 +18,7 @@ from app.models import (
 from app.services.assessment.schema import Citation, CriterionRating
 from app.services.citations import normalise
 from app.services.retrieval import RetrievalResult, Retriever, criterion_query
+from app.services.scales import Scale
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,7 @@ class CheckedRating:
 
 
 def check_rating(
-    rating: CriterionRating, data: AssessmentInput, rubric_status: RubricStatus
+    rating: CriterionRating, data: AssessmentInput, rubric_status: RubricStatus, scale: Scale
 ) -> CheckedRating:
     checked = CheckedRating(rating)
 
@@ -129,7 +130,9 @@ def check_rating(
     verify(rating.supporting, checked.supporting)
     verify(rating.contradicting, checked.contradicting)
 
-    if rating.rating >= 2 and not checked.supporting:
+    if not scale.contains(rating.rating):
+        raise ValueError(f"rating {rating.rating} is outside the {scale.label} scale")
+    if rating.rating >= scale.cited_from and not checked.supporting:
         checked.flags.append("uncited_rating")
     if checked.discarded:
         checked.flags.append("citations_discarded")

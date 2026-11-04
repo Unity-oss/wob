@@ -42,19 +42,12 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = None
     login_max_failures: int = Field(default=5, gt=0)
     lockout_minutes: int = Field(default=15, gt=0)
-    password_min_length: int = Field(default=12, ge=8)
+    password_min_length: int = Field(default=8, ge=8)
     mfa_required_roles: list[str] = ["admin", "committee"]
 
     # File storage, encrypted at rest (spec §3, §12): "id:base64key,..." of 32-byte keys, kept
     # outside the database and storage. New files use the active key; older ids still decrypt.
-    storage_backend: Literal["local", "r2"] = "local"
     storage_dir: Path = BACKEND_DIR / "var" / "storage"
-    # Cloudflare R2 (S3-compatible); only read when storage_backend is "r2".
-    r2_bucket: str | None = None
-    r2_endpoint_url: str | None = None  # https://<account_id>.r2.cloudflarestorage.com
-    r2_access_key_id: str | None = None
-    r2_secret_access_key: SecretStr | None = None
-    r2_prefix: str = ""
     file_encryption_keys: SecretStr | None = None
     file_encryption_active_key: str | None = None
     # Only for throwaway local experiments; never in a deployment.
@@ -108,6 +101,9 @@ class Settings(BaseSettings):
     claim_max_output_tokens: int = Field(default=64000, gt=0)
     # Passage tokens per extraction request; larger evidence sets are split into batches.
     claim_batch_tokens: int = Field(default=120_000, gt=1000)
+    # Jury decision (23 Oct 2026): claims a supporting document supports are verified on
+    # extraction. Turning it off stops new automatic verifications; earlier ones stand.
+    jury_verifies_supporting_documents: bool = True
 
     # External research (FR-13): web search about the nominee via Claude's server-side tools.
     # Needs the same approval as claim extraction, plus its own switch.

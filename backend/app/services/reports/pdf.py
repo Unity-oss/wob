@@ -24,7 +24,7 @@ from reportlab.platypus import (
 
 from app.services.reports.data import CriterionResult, FinalistReport, ReportData
 
-GENERATOR_VERSION = "report-v1"
+GENERATOR_VERSION = "report-v2"  # v2: Times New Roman, 12 pt, 1.5 line spacing
 
 INK = colors.HexColor("#17212b")
 MUTED = colors.HexColor("#5b6876")
@@ -35,51 +35,35 @@ WARN = colors.HexColor("#8a5a00")
 WARN_SOFT = colors.HexColor("#fdf3e0")
 
 _base = getSampleStyleSheet()
+# Times New Roman (PDF's built-in Times), 12 pt text with 1.5 line spacing throughout;
+# headings are larger and bold.
+FONT, FONT_BOLD = "Times-Roman", "Times-Bold"
+TEXT_SIZE = 12
+LINE_SPACING = 1.5
+
+
+def _style(name: str, size: float = TEXT_SIZE, bold: bool = False, **extra) -> ParagraphStyle:
+    return ParagraphStyle(
+        name,
+        parent=_base["Normal"],
+        fontName=FONT_BOLD if bold else FONT,
+        fontSize=size,
+        leading=size * LINE_SPACING,
+        **extra,
+    )
+
+
 STYLES = {
-    "title": ParagraphStyle(
-        "title",
-        parent=_base["Title"],
-        fontSize=18,
-        leading=22,
-        textColor=ACCENT,
-        alignment=0,
-        spaceAfter=2,
-    ),
-    "subtitle": ParagraphStyle(
-        "subtitle", parent=_base["Normal"], fontSize=10, textColor=MUTED, spaceAfter=10
-    ),
-    "h2": ParagraphStyle(
-        "h2",
-        parent=_base["Heading2"],
-        fontSize=13,
-        leading=16,
-        textColor=ACCENT,
-        spaceBefore=12,
-        spaceAfter=6,
-    ),
-    "h3": ParagraphStyle(
-        "h3",
-        parent=_base["Heading3"],
-        fontSize=11,
-        leading=14,
-        textColor=INK,
-        spaceBefore=8,
-        spaceAfter=3,
-    ),
-    "body": ParagraphStyle("body", parent=_base["Normal"], fontSize=9.5, leading=13, textColor=INK),
-    "small": ParagraphStyle(
-        "small", parent=_base["Normal"], fontSize=8.5, leading=11, textColor=MUTED
-    ),
-    "quote": ParagraphStyle(
-        "quote", parent=_base["Normal"], fontSize=9, leading=12, textColor=INK, leftIndent=8
-    ),
-    "cell": ParagraphStyle("cell", parent=_base["Normal"], fontSize=8.5, leading=11),
-    "cellc": ParagraphStyle(
-        "cellc", parent=_base["Normal"], fontSize=8.5, leading=11, alignment=TA_CENTER
-    ),
-    "notice": ParagraphStyle(
-        "notice", parent=_base["Normal"], fontSize=9.5, leading=13, textColor=INK
-    ),
+    "title": _style("title", 18, bold=True, textColor=ACCENT, spaceAfter=2),
+    "subtitle": _style("subtitle", textColor=MUTED, spaceAfter=10),
+    "h2": _style("h2", 14, bold=True, textColor=ACCENT, spaceBefore=12, spaceAfter=6),
+    "h3": _style("h3", 13, bold=True, textColor=INK, spaceBefore=8, spaceAfter=3),
+    "body": _style("body", textColor=INK),
+    "small": _style("small", textColor=MUTED),
+    "quote": _style("quote", textColor=INK, leftIndent=8),
+    "cell": _style("cell"),
+    "cellc": _style("cellc", alignment=TA_CENTER),
+    "notice": _style("notice", textColor=INK),
 }
 
 
@@ -159,7 +143,8 @@ def _page_decorator(data: ReportData, label: str) -> Callable:
             canvas.drawImage(
                 _watermark(round(width), round(height)), 0, 0, width, height, mask="auto"
             )
-        canvas.setFont("Helvetica", 7.5)
+        # Page furniture stays small so the disclaimer fits on one line.
+        canvas.setFont(FONT, 8)
         canvas.setFillColor(MUTED)
         canvas.drawString(
             doc.leftMargin,
@@ -318,7 +303,7 @@ def render_individual(data: ReportData, f: FinalistReport) -> bytes:
             [
                 [
                     p("Provisional rank", "cell"),
-                    p("Score (1–5)", "cell"),
+                    p(f"Score ({data.scale.label})", "cell"),
                     p("Out of 100", "cell"),
                     p("Criteria rated", "cell"),
                     p("Awaiting review", "cell"),

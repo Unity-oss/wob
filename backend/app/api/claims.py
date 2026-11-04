@@ -18,8 +18,6 @@ from app.models import (
     Document,
     ExternalSource,
     ProcessingStatus,
-    Role,
-    User,
     VerificationReview,
 )
 from app.schemas.claims import (
@@ -33,7 +31,7 @@ from app.schemas.claims import (
     ReviewIn,
     ReviewOut,
 )
-from app.security.auth import COORDINATOR_ROLES, Coordinator, CurrentUser, require_roles
+from app.security.auth import Coordinator, CurrentUser, Reviewer
 from app.services import audit, consent
 from app.services.claims.llm import provider_status
 from app.services.verification import (
@@ -47,15 +45,12 @@ from app.workers.claims import latest_run, new_run
 router = APIRouter(prefix="/api/v1", tags=["claims"])
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
-REVIEWER_ROLES = (*COORDINATOR_ROLES, Role.REVIEWER)
-Reviewer = Annotated[User, Depends(require_roles(*REVIEWER_ROLES))]
-
 
 def _review_out(review: VerificationReview) -> ReviewOut:
     return ReviewOut(
         id=review.id,
-        reviewer=review.reviewer.display_name,
-        reviewer_role=review.reviewer.role.value,
+        reviewer=review.reviewer.display_name if review.reviewer else "Jury decision",
+        reviewer_role=review.reviewer.role.value if review.reviewer else "automatic",
         previous_status=review.previous_status,
         decision=review.decision,
         notes=review.notes,

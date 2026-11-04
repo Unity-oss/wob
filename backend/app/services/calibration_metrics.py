@@ -1,6 +1,6 @@
 """Agreement statistics for calibrating AI ratings against human benchmark ratings (FR-15).
 
-Ratings are ordinal (official 1-5 scale), so the headline statistic is quadratic-weighted
+Ratings are ordinal (the rubric's 1-5 or 0-3 scale), so the headline statistic is quadratic-weighted
 Cohen's kappa (QWK): 1 = perfect agreement, 0 = no better than chance given each side's rating
 distribution, negative = worse than chance. Disagreements are penalised by squared distance.
 
@@ -17,16 +17,18 @@ from statistics import fmean
 SCALE = (1, 2, 3, 4, 5)
 
 
-def quadratic_weighted_kappa(a: Sequence[int], b: Sequence[int]) -> float | None:
-    """QWK on the full 1-5 scale. None when undefined (fewer than 2 items, or no variation
-    in either rater, so chance-expected disagreement is zero)."""
+def quadratic_weighted_kappa(
+    a: Sequence[int], b: Sequence[int], levels: Sequence[int] = SCALE
+) -> float | None:
+    """QWK over every level of the scale. None when undefined (fewer than 2 items, or no
+    variation in either rater, so chance-expected disagreement is zero)."""
     if len(a) != len(b):
         raise ValueError("rating lists must be paired")
     n = len(a)
     if n < 2:
         return None
-    k = len(SCALE)
-    index = {v: i for i, v in enumerate(SCALE)}
+    k = len(levels)
+    index = {v: i for i, v in enumerate(levels)}
     observed = [[0.0] * k for _ in range(k)]
     for x, y in zip(a, b, strict=True):
         observed[index[x]][index[y]] += 1
@@ -48,13 +50,13 @@ class PairStats:
     qwk: float | None
 
 
-def pair_stats(a: Sequence[int], b: Sequence[int]) -> PairStats:
+def pair_stats(a: Sequence[int], b: Sequence[int], levels: Sequence[int] = SCALE) -> PairStats:
     n = len(a)
     return PairStats(
         n=n,
         exact=sum(x == y for x, y in zip(a, b, strict=True)) / n if n else 0.0,
         within_one=sum(abs(x - y) <= 1 for x, y in zip(a, b, strict=True)) / n if n else 0.0,
-        qwk=quadratic_weighted_kappa(a, b),
+        qwk=quadratic_weighted_kappa(a, b, levels),
     )
 
 
@@ -76,16 +78,18 @@ class Agreement:
     pairs: dict[str, int] = field(default_factory=dict)
 
 
-def agreement(ai: Sequence[int], humans: dict[str, Sequence[int | None]]) -> Agreement:
+def agreement(
+    ai: Sequence[int], humans: dict[str, Sequence[int | None]], levels: Sequence[int] = SCALE
+) -> Agreement:
     rated = [i for i in range(len(ai)) if any(h[i] is not None for h in humans.values())]
 
     def paired(x: Sequence[int | None], y: Sequence[int | None]) -> tuple[list[int], list[int]]:
         keep = [i for i in range(len(ai)) if x[i] is not None and y[i] is not None]
         return [x[i] for i in keep], [y[i] for i in keep]  # type: ignore[misc]
 
-    ai_pairs = [pair_stats(*paired(ai, h)) for h in humans.values()]
+    ai_pairs = [pair_stats(*paired(ai, h), levels) for h in humans.values()]
     ai_pairs = [p for p in ai_pairs if p.n]
-    human_pairs = [pair_stats(*paired(x, y)) for x, y in combinations(humans.values(), 2)]
+    human_pairs = [pair_stats(*paired(x, y), levels) for x, y in combinations(humans.values(), 2)]
     human_pairs = [p for p in human_pairs if p.n]
 
     def summarise(stats: list[PairStats]) -> dict[str, float | None]:

@@ -30,10 +30,13 @@ from app.services.claims.extraction import (
     parse_period,
 )
 from app.services.claims.llm import ClaimLLM, ExtractionLLMError
+from app.services.research.matching import ClaimMatcher, match_after_job
+from app.services.tracing import trace_job
 from app.services.verification import (
     carry_forward,
     external_evidence_by_wording,
     reviewed_claims_by_wording,
+    verify_from_supporting_documents,
 )
 
 log = logging.getLogger("wob.claims")
@@ -64,6 +67,8 @@ class ClaimPipeline:
     sessions: sessionmaker[Session]
     llm: ClaimLLM
     settings: Settings
+    # Links auto-accepted criterion sources to the new claims they support.
+    matcher: ClaimMatcher | None = None
 
     def run_once(self) -> bool:
         with self.sessions() as session:
@@ -80,6 +85,7 @@ class ClaimPipeline:
         self.process(run_id)
         return True
 
+    @trace_job("claim extraction", "run_id")
     def process(self, run_id: uuid.UUID) -> None:
         with self.sessions() as session:
             run = session.get_one(ClaimExtractionRun, run_id)
@@ -185,6 +191,11 @@ class ClaimPipeline:
                 prior = previous.get(normalise(c.statement))
                 if prior and carry_forward(session, claim, prior, bool(validated.contradicting)):
                     carried += 1
+            # Jury decision: claims a supporting document supports are verified.
+            jury_verified = 0
+            if self.settings.jury_verifies_supporting_documents:
+                session.flush()
+                jury_verified = verify_from_supporting_documents(session, finalist_category_id)
             run.status = JobStatus.SUCCEEDED
             run.completed_at = now
             run.error = None
@@ -206,6 +217,7 @@ class ClaimPipeline:
                 run_id,
                 claims=len(outcome.claims),
                 carried_forward=carried,
+                jury_verified=jury_verified,
                 discarded=len(outcome.discarded),
                 served_by=outcome.served_by,
                 usage=outcome.usage,
@@ -217,6 +229,7 @@ class ClaimPipeline:
             len(outcome.claims),
             len(outcome.discarded),
         )
+        match_after_job(self.sessions, self.matcher, finalist_category_id, only_unmatched=False)
 
     def _fail(self, run_id: uuid.UUID, message: str, *, retry: bool) -> None:
         with self.sessions() as session:

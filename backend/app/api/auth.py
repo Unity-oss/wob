@@ -1,4 +1,5 @@
-"""Sign-in, sessions, invitations, two-factor authentication and user administration."""
+"""Sign-in, sessions, invitations, two-factor authentication, user administration and the rights
+of each user group."""
 
 import uuid
 from typing import Annotated
@@ -11,21 +12,14 @@ from sqlalchemy.orm import Session
 from app.api.knowledge_base import SessionDep
 from app.config import Settings, get_settings
 from app.models import Role, User, UserSession
-from app.security import accounts
+from app.security import accounts, permissions
 from app.security.accounts import AuthError
-from app.security.auth import (
-    COORDINATOR_ROLES,
-    SESSION_COOKIE,
-    Admin,
-    AuthenticatedUser,
-    request_token,
-)
+from app.security.auth import SESSION_COOKIE, Admin, AuthenticatedUser, request_token
+from app.security.permissions import Permission
 from app.services import audit, email
 
 router = APIRouter(prefix="/api/v1", tags=["authentication"])
 SettingsDep = Annotated[Settings, Depends(get_settings)]
-
-REVIEWER_ROLES = (*COORDINATOR_ROLES, Role.REVIEWER)
 
 
 def _client(request: Request) -> tuple[str | None, str | None]:
@@ -39,7 +33,8 @@ def _fail(
     return HTTPException(code, {"code": exc.code, "message": str(exc)})
 
 
-def me_payload(user: User, settings: Settings) -> dict:
+def me_payload(session: Session, user: User, settings: Settings) -> dict:
+    granted = permissions.granted(session, user.role)
     return {
         "id": str(user.id),
         "email": user.email,
@@ -48,11 +43,8 @@ def me_payload(user: User, settings: Settings) -> dict:
         "mfa_enabled": user.mfa_enabled,
         "mfa_setup_required": accounts.mfa_required(user, settings) and not user.mfa_enabled,
         "permissions": {
-            "manage_evidence": user.role in COORDINATOR_ROLES,
-            "review_claims": user.role in REVIEWER_ROLES,
-            "approve_rubrics": user.role in (Role.ADMIN, Role.COMMITTEE),
+            **{p.value: p in granted for p in Permission},
             "administer_rubrics": user.role == Role.ADMIN,  # amend approved, unfreeze frozen
-            "generate_reports": user.role in (Role.ADMIN, Role.SECRETARIAT, Role.COMMITTEE),
             "manage_users": user.role == Role.ADMIN,
         },
     }
@@ -95,7 +87,7 @@ def login(
         session, user, settings, kind=kind, ip=ip, user_agent=agent
     )
     session.commit()
-    result = {"user": me_payload(user, settings), "expires_at": expires.isoformat()}
+    result = {"user": me_payload(session, user, settings), "expires_at": expires.isoformat()}
     if body.issue_bearer_token:
         result["token"] = token
     else:
@@ -113,9 +105,9 @@ def logout(request: Request, response: Response, session: SessionDep) -> None:
 
 
 @router.get("/me")
-def me(user: AuthenticatedUser, settings: SettingsDep) -> dict:
+def me(user: AuthenticatedUser, session: SessionDep, settings: SettingsDep) -> dict:
     """The signed-in user and what they may do, so the UI shows the right controls."""
-    return me_payload(user, settings)
+    return me_payload(session, user, settings)
 
 
 class AcceptInviteIn(BaseModel):
@@ -139,7 +131,7 @@ def accept_invite(
     token, expires = accounts.create_session(session, user, settings, ip=ip, user_agent=agent)
     session.commit()
     _set_cookie(response, token, settings)
-    return {"user": me_payload(user, settings), "expires_at": expires.isoformat()}
+    return {"user": me_payload(session, user, settings), "expires_at": expires.isoformat()}
 
 
 class PasswordChangeIn(BaseModel):
@@ -206,7 +198,7 @@ def mfa_enable(
     except AuthError as exc:
         raise _fail(session, exc, status.HTTP_400_BAD_REQUEST) from exc
     session.commit()
-    return me_payload(user, settings)
+    return me_payload(session, user, settings)
 
 
 # --- User administration (admins) --------------------------------------------------------------
@@ -354,3 +346,64 @@ def reissue_invite(
     link = accounts.create_invite(session, user, admin, settings)
     session.commit()
     return _invitation_out(session, settings, user, link, admin, reset=True)
+
+
+# --- Rights of each user group (admins) --------------------------------------------------------
+
+
+@router.get("/role-permissions")
+def list_role_permissions(session: SessionDep, _: Admin) -> dict:
+    """The rights an administrator can grant, and which user groups hold each."""
+    return {
+        "permissions": [
+            {
+                "key": p.value,
+                "label": label,
+                "description": description,
+                "never_for": [r.value for r in permissions.NEVER.get(p, ())],
+            }
+            for p, (label, description) in permissions.DESCRIPTIONS.items()
+        ],
+        "groups": [
+            {"role": role.value, "permissions": sorted(permissions.granted(session, role))}
+            for role in permissions.GROUPS
+        ],
+    }
+
+
+class RolePermissionsIn(BaseModel):
+    permissions: list[Permission] = Field(max_length=len(Permission))
+
+
+@router.put("/role-permissions/{role}")
+def update_role_permissions(
+    role: Role, body: RolePermissionsIn, session: SessionDep, admin: Admin
+) -> dict:
+    """Set a user group's rights. They apply to its members from their next request."""
+    if role not in permissions.GROUPS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "administrators always hold every right"
+        )
+    barred = [p for p in body.permissions if role in permissions.NEVER.get(p, ())]
+    if barred:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{email.ROLE_NAMES[role]}s can't be given: "
+            + ", ".join(permissions.DESCRIPTIONS[p][0] for p in barred),
+        )
+    before = sorted(permissions.granted(session, role))
+    after = sorted(set(body.permissions))
+    permissions.set_granted(session, role, set(after))
+    if before != after:
+        audit.record(
+            session,
+            admin,
+            "role.permissions_updated",
+            "role",
+            None,
+            role=role.value,
+            before=before,
+            after=after,
+        )
+    session.commit()
+    return {"role": role.value, "permissions": after}

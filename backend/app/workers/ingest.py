@@ -33,7 +33,7 @@ from app.services.extraction import (
     extract,
 )
 from app.services.scanning import Scanner, ScanResult, get_scanner
-from app.services.storage import FileStorage, StorageIntegrityError, build_storage
+from app.services.storage import LocalStorage, StorageIntegrityError, build_storage
 
 log = logging.getLogger("wob.ingest")
 
@@ -74,7 +74,7 @@ class Rejected(Exception):
 @dataclass
 class Pipeline:
     sessions: sessionmaker[Session]
-    storage: FileStorage
+    storage: LocalStorage
     scanner: Scanner
     embedder: Embedder
     ocr: Ocr

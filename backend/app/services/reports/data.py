@@ -38,6 +38,7 @@ from app.models import (
 from app.services.calibration import latest_result
 from app.services.ranking import display, display_points
 from app.services.reports.questions import category_questions, finalist_questions
+from app.services.scales import Scale, scale_of
 
 DISCLAIMER = (
     "AI rankings are advisory. The awards committee retains responsibility for final "
@@ -129,6 +130,7 @@ class ReportData:
     snapshot_at: datetime
     calculation_version: str
     weighting: str
+    scale: Scale
     rubric_version: int
     rubric_status: RubricStatus
     run: dict[str, object]
@@ -176,6 +178,7 @@ def _finalist(
     criteria: list[RubricCriterion],
     run: AssessmentRun,
     tied_with: list[str],
+    scale: Scale,
 ) -> FinalistReport:
     fc = session.get_one(FinalistCategory, entry.finalist_category_id)
     finalist = session.get_one(Finalist, fc.finalist_id)
@@ -268,7 +271,7 @@ def _finalist(
         is_tie=entry.is_tie,
         tied_with=tied_with,
         score_display=display(entry.score),
-        points_display=display_points(entry.score),
+        points_display=display_points(entry.score, scale),
         criteria_assessed=entry.criteria_assessed,
         criteria_total=entry.criteria_total,
         unreviewed=list(entry.unreviewed_criteria),
@@ -279,15 +282,16 @@ def _finalist(
         accepted_public_sources=public or 0,
         documents=documents,
     )
+    # Strengths: the top two levels on 1-5 (4 and 5), the top two on 0-3 (Good, Excellent).
     report.strengths = [
-        f"{r.name} ({r.snapshot_rating}/5)"
+        f"{r.name} ({r.snapshot_rating}/{scale.high})"
         + (f": “{_first_support(r)}” ({r.citations[0].source})" if _first_support(r) else "")
         for r in sorted(results, key=lambda r: -(r.snapshot_rating or 0))
-        if (r.snapshot_rating or 0) >= 4
+        if r.snapshot_rating is not None and r.snapshot_rating >= scale.high - 1
     ]
     report.limitations = [
         f"{r.name} ({r.snapshot_rating if r.snapshot_rating is not None else 'not rated'}"
-        f"{'/5' if r.snapshot_rating is not None else ''}): "
+        f"{f'/{scale.high}' if r.snapshot_rating is not None else ''}): "
         + (r.limitations or f"evidence {r.sufficiency or 'not assessed'}")
         for r in results
         if r.snapshot_rating is None
@@ -313,6 +317,7 @@ def _calibration_line(session: Session, snapshot: RankingSnapshot) -> str:
 def gather(session: Session, snapshot: RankingSnapshot) -> ReportData:
     run = session.get_one(AssessmentRun, snapshot.run_id)
     rubric = session.get_one(RubricVersion, snapshot.rubric_version_id)
+    scale = scale_of(rubric.scale)
     category = session.get_one(AwardCategory, snapshot.category_id)
     criteria = list(rubric.criteria)
     names = dict(
@@ -337,6 +342,7 @@ def gather(session: Session, snapshot: RankingSnapshot) -> ReportData:
                 for o in entries
                 if e.is_tie and o is not e and o.score == e.score
             ],
+            scale,
         )
         for e in entries
     ]
@@ -345,7 +351,7 @@ def gather(session: Session, snapshot: RankingSnapshot) -> ReportData:
     close = [
         (names[a.finalist_category_id], names[b.finalist_category_id], display(a.score - b.score))
         for a, b in zip(scored, scored[1:], strict=False)
-        if a.score - b.score <= Decimal("0.25")
+        if a.score - b.score <= Decimal("0.25") * (scale.high - scale.low) / 4
     ]
     spreads = []
     for c in criteria:
@@ -375,6 +381,7 @@ def gather(session: Session, snapshot: RankingSnapshot) -> ReportData:
         snapshot_at=snapshot.created_at,
         calculation_version=snapshot.calculation_version,
         weighting=snapshot.weighting.value,
+        scale=scale,
         rubric_version=rubric.version,
         rubric_status=snapshot.rubric_status,
         run={

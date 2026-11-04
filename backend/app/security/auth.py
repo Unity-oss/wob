@@ -1,7 +1,8 @@
 """Request authentication: a session cookie (browser) or Authorization: Bearer (API clients).
 
 Users in MFA_REQUIRED_ROLES must turn on two-factor authentication before they can use
-anything except their own account endpoints.
+anything except their own account endpoints. What each user group may do is set by an
+administrator (app/security/permissions.py).
 """
 
 from collections.abc import Callable
@@ -14,8 +15,8 @@ from app.config import Settings, get_settings
 from app.db import get_session
 from app.models import Role, User
 from app.security.accounts import mfa_required, resolve_session
+from app.security.permissions import Permission, has
 
-COORDINATOR_ROLES = (Role.ADMIN, Role.SECRETARIAT)
 SESSION_COOKIE = "wob_session"
 
 
@@ -65,7 +66,26 @@ def require_roles(*roles: Role) -> Callable[[User], User]:
     return dependency
 
 
+def require_permission(permission: Permission) -> Callable[[User, Session], User]:
+    def dependency(
+        user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> User:
+        if not has(session, user, permission):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "your user group lacks this right")
+        return user
+
+    return dependency
+
+
 AuthenticatedUser = Annotated[User, Depends(get_authenticated_user)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
-Coordinator = Annotated[User, Depends(require_roles(*COORDINATOR_ROLES))]
+Coordinator = Annotated[User, Depends(require_permission(Permission.MANAGE_EVIDENCE))]
+Reviewer = Annotated[User, Depends(require_permission(Permission.REVIEW_CLAIMS))]
+RubricApprover = Annotated[User, Depends(require_permission(Permission.APPROVE_RUBRICS))]
+ReportAuthor = Annotated[User, Depends(require_permission(Permission.GENERATE_REPORTS))]
+StudyManager = Annotated[User, Depends(require_permission(Permission.MANAGE_CALIBRATION))]
+Exporter = Annotated[User, Depends(require_permission(Permission.EXPORT_PERSONAL_DATA))]
+JudgeUser = Annotated[User, Depends(require_permission(Permission.SCORE_CANDIDATES))]
+ScoreViewer = Annotated[User, Depends(require_permission(Permission.VIEW_JUDGE_SCORES))]
 Admin = Annotated[User, Depends(require_roles(Role.ADMIN))]

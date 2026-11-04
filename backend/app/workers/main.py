@@ -14,6 +14,7 @@ from app.db import get_engine
 from app.services.claims.llm import AIProcessingNotApproved, get_claim_llm
 from app.services.reranking import get_reranker
 from app.services.research.llm import get_research_llm
+from app.services.research.matching import AnthropicClaimMatcher
 from app.services.retrieval import Retriever
 from app.workers.assessment import AnthropicAssessor, AssessmentPipeline
 from app.workers.claims import ClaimPipeline
@@ -28,9 +29,12 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
     ingest = build_pipeline(settings)
+    matcher = None
     try:
+        claim_llm = get_claim_llm(settings)
+        matcher = AnthropicClaimMatcher(claim_llm)
         claims = ClaimPipeline(
-            sessionmaker(get_engine(), expire_on_commit=False), get_claim_llm(settings), settings
+            sessionmaker(get_engine(), expire_on_commit=False), claim_llm, settings, matcher
         )
         log.info("claim extraction enabled (%s)", claims.llm.model_id)
     except AIProcessingNotApproved as exc:
@@ -51,7 +55,10 @@ def main() -> None:
 
     try:
         research = ResearchPipeline(
-            sessionmaker(get_engine(), expire_on_commit=False), get_research_llm(settings), settings
+            sessionmaker(get_engine(), expire_on_commit=False),
+            get_research_llm(settings),
+            settings,
+            matcher,
         )
         log.info("external research enabled")
     except AIProcessingNotApproved as exc:

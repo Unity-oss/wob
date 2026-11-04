@@ -28,7 +28,7 @@ from app.services.file_types import (
     expand_archive,
     safe_filename,
 )
-from app.services.storage import FileStorage
+from app.services.storage import LocalStorage
 
 
 @dataclass(frozen=True)
@@ -112,7 +112,7 @@ def _expand(
 
 def store_uploads(
     session: Session,
-    storage: FileStorage,
+    storage: LocalStorage,
     settings: Settings,
     *,
     finalist_category: FinalistCategory,

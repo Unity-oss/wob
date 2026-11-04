@@ -28,12 +28,14 @@ from app.models import (
     JobStatus,
     RubricVersion,
 )
-from app.prompts.criterion_assessment import SYSTEM_PROMPT, user_prompt
+from app.prompts.criterion_assessment import system_prompt, user_prompt
 from app.services import audit, consent
 from app.services.assessment.assess import build_input, check_rating
-from app.services.assessment.schema import CriterionRating
+from app.services.assessment.schema import CriterionRating, rating_output
 from app.services.claims.llm import AnthropicClaimLLM, ExtractionLLMError
 from app.services.retrieval import Retriever
+from app.services.scales import scale_of
+from app.services.tracing import trace_job
 
 log = logging.getLogger("wob.assessment")
 
@@ -41,7 +43,9 @@ log = logging.getLogger("wob.assessment")
 class AssessorLLM(Protocol):
     model_id: str
 
-    def assess(self, system: str, user: str) -> tuple[CriterionRating, str, dict[str, int]]: ...
+    def assess(
+        self, system: str, user: str, output: type[CriterionRating] = CriterionRating
+    ) -> tuple[CriterionRating, str, dict[str, int]]: ...
 
 
 class AnthropicAssessor:
@@ -49,8 +53,10 @@ class AnthropicAssessor:
         self.model_id = llm.model_id
         self._llm = llm
 
-    def assess(self, system: str, user: str) -> tuple[CriterionRating, str, dict[str, int]]:
-        return self._llm.call(system, user, CriterionRating)
+    def assess(
+        self, system: str, user: str, output: type[CriterionRating] = CriterionRating
+    ) -> tuple[CriterionRating, str, dict[str, int]]:
+        return self._llm.call(system, user, output)
 
 
 class ScriptedAssessor:
@@ -62,7 +68,9 @@ class ScriptedAssessor:
         self._respond = respond
         self.calls: list[tuple[str, str]] = []
 
-    def assess(self, system: str, user: str) -> tuple[CriterionRating, str, dict[str, int]]:
+    def assess(
+        self, system: str, user: str, output: type[CriterionRating] = CriterionRating
+    ) -> tuple[CriterionRating, str, dict[str, int]]:
         self.calls.append((system, user))
         result = self._respond(system, user)
         if isinstance(result, Exception):
@@ -113,6 +121,7 @@ class AssessmentPipeline:
         self.process(run_id)
         return True
 
+    @trace_job("assessment", "run_id")
     def process(self, run_id: uuid.UUID) -> None:
         with self.sessions() as session:
             run = session.get_one(AssessmentRun, run_id)
@@ -156,6 +165,7 @@ class AssessmentPipeline:
             session.commit()
             rubric_label = f"version {rubric.version} ({rubric.status.value})"
             rubric_status = rubric.status
+            scale = scale_of(rubric.scale)
 
         for fc_id, nominee in finalists:
             for criterion in criteria:
@@ -169,6 +179,7 @@ class AssessmentPipeline:
                         category.name,
                         rubric_label,
                         rubric_status,
+                        scale,
                         criterion,
                     )
                 except ExtractionLLMError as exc:
@@ -202,8 +213,9 @@ class AssessmentPipeline:
             session.commit()
         log.info("assessment run %s complete", run_id)
 
+    @trace_job("assess criterion", "run_id", "fc_id")
     def _assess_one(
-        self, run_id, fc_id, nominee, category, rubric_label, rubric_status, criterion
+        self, run_id, fc_id, nominee, category, rubric_label, rubric_status, scale, criterion
     ) -> None:
         with self.sessions() as session:
             data = build_input(session, self.retriever, fc_id, criterion)
@@ -218,8 +230,10 @@ class AssessmentPipeline:
                 (e.ref, e.label, e.text) for e in data.evidence.values() if e.external_source_id
             ],
         )
-        rating, served_by, usage = self.assessor.assess(SYSTEM_PROMPT, prompt)
-        checked = check_rating(rating, data, rubric_status)
+        rating, served_by, usage = self.assessor.assess(
+            system_prompt(scale), prompt, rating_output(scale)
+        )
+        checked = check_rating(rating, data, rubric_status, scale)
 
         with self.sessions() as session:
             run = session.get_one(AssessmentRun, run_id, with_for_update=True)

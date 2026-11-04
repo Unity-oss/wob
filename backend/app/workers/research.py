@@ -25,8 +25,11 @@ from app.prompts.external_research import PROMPT_VERSION, SYSTEM_PROMPT, user_pr
 from app.services import audit, consent
 from app.services.claims.llm import ExtractionLLMError
 from app.services.research.llm import ResearchLLM
+from app.services.research.matching import ClaimMatcher, match_after_job
 from app.services.research.research import verify_findings
 from app.services.rubrics import current_rubric
+from app.services.tracing import trace_job
+from app.services.verification import auto_accept_external_source
 
 log = logging.getLogger("wob.research")
 
@@ -86,6 +89,8 @@ class ResearchPipeline:
     sessions: sessionmaker[Session]
     llm: ResearchLLM
     settings: Settings
+    # Links auto-accepted criterion sources to the claims they support.
+    matcher: ClaimMatcher | None = None
 
     def run_once(self) -> bool:
         with self.sessions() as session:
@@ -102,6 +107,7 @@ class ResearchPipeline:
         self.process(run_id)
         return True
 
+    @trace_job("research", "run_id")
     def process(self, run_id: uuid.UUID) -> None:
         with self.sessions() as session:
             run = session.get_one(ResearchRun, run_id)
@@ -162,28 +168,31 @@ class ResearchPipeline:
                 )
                 .values(superseded_at=now)
             )
-            for f in outcome.findings:
-                session.add(
-                    ExternalSource(
-                        finalist_category_id=fc.id,
-                        research_run_id=run_id,
-                        claim_id=f.claim_id,
-                        criterion_code=f.criterion[0] if f.criterion else None,
-                        criterion_name=f.criterion[1] if f.criterion else None,
-                        relation=EvidenceRelation(f.relation) if f.relation else None,
-                        publisher=f.publisher,
-                        url=f.url,
-                        title=f.title,
-                        published_at=f.published_at,
-                        retrieved_at=f.retrieved_at,
-                        quote=f.quote,
-                        evidence_passage=f.passage,
-                        content_sha256=f.content_sha256,
-                        source_type=f.source_type,
-                        identity_confidence=QualityLevel(f.identity_confidence),
-                        identity_notes=f.identity_notes,
-                    )
+            sources = [
+                ExternalSource(
+                    finalist_category_id=fc.id,
+                    research_run_id=run_id,
+                    claim_id=f.claim_id,
+                    criterion_code=f.criterion[0] if f.criterion else None,
+                    criterion_name=f.criterion[1] if f.criterion else None,
+                    relation=EvidenceRelation(f.relation) if f.relation else None,
+                    publisher=f.publisher,
+                    url=f.url,
+                    title=f.title,
+                    published_at=f.published_at,
+                    retrieved_at=f.retrieved_at,
+                    quote=f.quote,
+                    evidence_passage=f.passage,
+                    content_sha256=f.content_sha256,
+                    source_type=f.source_type,
+                    identity_confidence=QualityLevel(f.identity_confidence),
+                    identity_notes=f.identity_notes,
                 )
+                for f in outcome.findings
+            ]
+            session.add_all(sources)
+            session.flush()
+            auto_accepted = sum(auto_accept_external_source(session, s) for s in sources)
             run.status = JobStatus.SUCCEEDED
             run.completed_at = now
             run.error = None
@@ -205,17 +214,20 @@ class ResearchPipeline:
                 "research_run",
                 run_id,
                 findings=len(outcome.findings),
+                auto_accepted=auto_accepted,
                 discarded=len(outcome.discarded),
                 searches=result.searches,
                 pages_fetched=len(result.pages),
             )
             session.commit()
         log.info(
-            "research run %s: %d findings, %d discarded",
+            "research run %s: %d findings (%d auto-accepted), %d discarded",
             run_id,
             len(outcome.findings),
+            auto_accepted,
             len(outcome.discarded),
         )
+        match_after_job(self.sessions, self.matcher, fc.id, only_unmatched=True)
 
     def _fail(self, run_id: uuid.UUID, message: str, *, retry: bool) -> None:
         with self.sessions() as session:

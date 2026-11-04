@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.config import Settings
 from app.services.claims.schema import ClaimExtractionOutput
+from app.services.tracing import tag_model, trace_llm, usage_metadata
 
 
 class ExtractionLLMError(Exception):
@@ -114,10 +115,12 @@ class AnthropicClaimLLM:
         output, served_by, usage = self.call(system, user, ClaimExtractionOutput)
         return LLMResult(output=output, served_by=served_by, usage=usage)
 
+    @trace_llm("claude", lambda result: {"usage_metadata": usage_metadata(result[2])})
     def call(
         self, system: str, user: str, output_model: type[BaseModelT]
     ) -> tuple[BaseModelT, str, dict[str, int]]:
         """One structured-output request; returns (parsed output, serving model, usage)."""
+        tag_model(self.model_id.split(":", 1)[0], self._model)
         try:
             with self._client.beta.messages.stream(
                 model=self._model,

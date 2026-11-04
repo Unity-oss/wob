@@ -75,6 +75,15 @@ class User(Base):
     mfa_enabled: Mapped[bool] = mapped_column(default=False)
 
 
+class RolePermission(Base):
+    """A right an administrator has granted a user group (app/security/permissions.py)."""
+
+    __tablename__ = "role_permissions"
+
+    role: Mapped[Role] = mapped_column(_pg_enum(Role, "user_role"), primary_key=True)
+    permission: Mapped[str] = mapped_column(primary_key=True)
+
+
 class UserSession(Base):
     __tablename__ = "user_sessions"
 
@@ -112,7 +121,10 @@ class AwardCategory(Base):
     name: Mapped[str]
     description: Mapped[str | None]
     retention_until: Mapped[date | None] = mapped_column(Date)
+    hidden_at: Mapped[datetime | None] = mapped_column(Timestamp)
     created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
+    judging_closed_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    judging_closed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
 class RubricStatus(enum.StrEnum):
@@ -138,6 +150,8 @@ class RubricVersion(Base):
     weighting: Mapped[WeightingMode] = mapped_column(
         _pg_enum(WeightingMode, "weighting_mode"), default=WeightingMode.EQUAL
     )
+    # app.services.scales.RatingScale: 0-3 for new versions, 1-5 for the original ones.
+    scale: Mapped[str] = mapped_column(default="zero_to_three")
     eligibility_rules: Mapped[list[Any]] = mapped_column(JSONB, default=list)
     notes: Mapped[str | None]
     approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
@@ -364,13 +378,15 @@ class QualityLevel(enum.StrEnum):
 
 
 class VerificationReview(Base):
-    """Append-only: a claim's history of reviewer decisions."""
+    """Append-only: a claim's history of reviewer decisions. A decision made automatically under
+    a jury decision records its basis instead of a reviewer."""
 
     __tablename__ = "verification_reviews"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     claim_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("claims.id"))
-    reviewer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    reviewer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    basis: Mapped[str | None]
     previous_status: Mapped[ClaimStatus | None] = mapped_column(
         _pg_enum(ClaimStatus, "claim_status")
     )
@@ -385,7 +401,7 @@ class VerificationReview(Base):
     carried_from: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("verification_reviews.id"))
     created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
 
-    reviewer: Mapped[User] = relationship(lazy="joined")
+    reviewer: Mapped[User | None] = relationship(lazy="joined")
 
 
 class ContradictionResolution(Base):
@@ -438,7 +454,7 @@ class ResearchRun(Base):
 
 class ExternalSource(Base):
     """A public-web finding about one claim or one award criterion, pending a reviewer's
-    acceptance."""
+    acceptance unless it was accepted automatically as coming from a credible source."""
 
     __tablename__ = "external_sources"
 
@@ -471,10 +487,12 @@ class ExternalSource(Base):
     reviewer_outcome: Mapped[ReviewOutcome] = mapped_column(
         _pg_enum(ReviewOutcome, "review_outcome"), default=ReviewOutcome.PENDING
     )
+    auto_accepted: Mapped[bool] = mapped_column(default=False)
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     reviewed_at: Mapped[datetime | None] = mapped_column(Timestamp)
     review_notes: Mapped[str | None]
     superseded_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    claims_matched_at: Mapped[datetime | None] = mapped_column(Timestamp)
     created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
 
 
@@ -549,7 +567,8 @@ class CriterionAssessment(Base):
 
     @property
     def effective_rating(self) -> int:
-        return self.reviewer_rating or self.rating
+        # 0 is a real rating on the 0-3 scale, so test for None rather than falsiness.
+        return self.rating if self.reviewer_rating is None else self.reviewer_rating
 
 
 class AssessmentCitation(Base):
@@ -709,3 +728,32 @@ class AuditEvent(Base):
     entity_type: Mapped[str]
     entity_id: Mapped[uuid.UUID | None]
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+
+class JudgeScore(Base):
+    """One judge's own score (0-3) and comment for a finalist, given independently."""
+
+    __tablename__ = "judge_scores"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    finalist_category_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("finalist_categories.id"))
+    judge_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    score: Mapped[int]
+    comment: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
+
+
+class ReferenceNote(Base):
+    """What one of a finalist's references said, recorded by a coordinator (up to four)."""
+
+    __tablename__ = "reference_notes"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    finalist_category_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("finalist_categories.id"))
+    position: Mapped[int]
+    referee_name: Mapped[str]
+    notes: Mapped[str]
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())

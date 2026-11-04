@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AssessmentStatus, CriterionAssessment, EvidenceRelation, User
 from app.services import audit
+from app.services.scales import Scale
 
 
 class AssessmentReviewRejected(ValueError):
@@ -22,6 +23,7 @@ def review_assessment(
     *,
     adjusted_rating: int | None = None,
     notes: str | None = None,
+    scale: Scale,
 ) -> None:
     notes = (notes or "").strip() or None
     if decision not in (AssessmentStatus.APPROVED, AssessmentStatus.REJECTED):
@@ -29,18 +31,20 @@ def review_assessment(
     if decision == AssessmentStatus.REJECTED and not notes:
         raise AssessmentReviewRejected("explain why the rating is rejected")
     if adjusted_rating is not None:
-        if not 1 <= adjusted_rating <= 5:
-            raise AssessmentReviewRejected("ratings are whole numbers from 1 to 5")
+        if not scale.contains(adjusted_rating):
+            raise AssessmentReviewRejected(
+                f"ratings are whole numbers from {scale.low} to {scale.high}"
+            )
         if not notes:
             raise AssessmentReviewRejected("give the reason for adjusting the rating")
     if decision == AssessmentStatus.APPROVED:
-        rating = adjusted_rating or assessment.rating
+        rating = assessment.rating if adjusted_rating is None else adjusted_rating
         supported = any(c.relation == EvidenceRelation.SUPPORTS for c in assessment.citations)
-        if rating >= 2 and not supported:
+        if rating >= scale.cited_from and not supported:
             # Spec §13: no unsupported material claims in approved results.
             raise AssessmentReviewRejected(
-                "a rating of 2 or more needs at least one verified supporting citation; "
-                "reject it for re-assessment or adjust it to 1"
+                f"a rating of {scale.cited_from} or more needs at least one verified supporting "
+                f"citation; reject it for re-assessment or adjust it to {scale.cited_from - 1}"
             )
 
     previous = {"status": assessment.status.value, "reviewer_rating": assessment.reviewer_rating}

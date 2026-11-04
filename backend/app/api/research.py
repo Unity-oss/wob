@@ -48,6 +48,7 @@ def _source_out(session: Session, source: ExternalSource) -> SourceOut:
         identity_confirmed=source.identity_confirmed,
         credibility=source.credibility,
         reviewer_outcome=source.reviewer_outcome,
+        auto_accepted=source.auto_accepted,
         reviewed_by=reviewer.display_name if reviewer else None,
         reviewed_at=source.reviewed_at,
         review_notes=source.review_notes,
@@ -151,7 +152,8 @@ def get_research_run(run_id: uuid.UUID, session: SessionDep, _: CurrentUser) -> 
 def review_source(
     source_id: uuid.UUID, body: SourceReviewIn, session: SessionDep, user: Reviewer
 ) -> SourceOut:
-    """Accept a finding as evidence for its claim or criterion, or reject it."""
+    """Accept a finding as evidence for its claim or criterion, or reject it (including one that
+    was accepted automatically)."""
     source = session.get(ExternalSource, source_id, with_for_update=True)
     if source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")

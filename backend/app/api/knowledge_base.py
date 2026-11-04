@@ -1,6 +1,7 @@
 """Knowledge base: award categories, their shortlisted candidates, and candidate evidence."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import (
@@ -30,14 +31,17 @@ from app.models import (
     FinalistCategory,
     Import,
     ProcessingStatus,
+    ReferenceNote,
     RubricCriterion,
     RubricVersion,
     SourceType,
+    User,
     VerificationReview,
 )
 from app.schemas.knowledge_base import (
     CategoryCreate,
     CategoryOut,
+    CategoryVisibilityIn,
     ChunkOut,
     CitationCheckOut,
     CitationVerifyRequest,
@@ -45,18 +49,20 @@ from app.schemas.knowledge_base import (
     FinalistCreate,
     FinalistOut,
     PassageOut,
+    ReferenceNoteOut,
+    ReferenceNotesIn,
     SearchResultOut,
     SkippedFileOut,
     UploadResultOut,
     WithdrawRequest,
 )
-from app.security.auth import Coordinator, CurrentUser
+from app.security.auth import Admin, Coordinator, CurrentUser
 from app.services import audit, consent
 from app.services.citations import Citation, verify_citations
 from app.services.documents import Upload, store_uploads, withdraw_document
 from app.services.http import attachment
 from app.services.retrieval import criterion_query, get_retriever
-from app.services.storage import FileStorage, get_storage
+from app.services.storage import LocalStorage, get_storage
 
 router = APIRouter(prefix="/api/v1", tags=["knowledge base"])
 
@@ -111,7 +117,10 @@ def _finalist_out(
 
 
 @router.get("/categories")
-def list_categories(session: SessionDep, _: CurrentUser) -> list[CategoryOut]:
+def list_categories(
+    session: SessionDep, _: CurrentUser, include_hidden: bool = False
+) -> list[CategoryOut]:
+    """Categories by name; hidden ones (such as test categories) only with include_hidden."""
     finalist_count = (
         select(func.count(FinalistCategory.id))
         .where(FinalistCategory.category_id == AwardCategory.id)
@@ -123,9 +132,10 @@ def list_categories(session: SessionDep, _: CurrentUser) -> list[CategoryOut]:
         .where(FinalistCategory.category_id == AwardCategory.id, Document.withdrawn_at.is_(None))
         .scalar_subquery()
     )
-    rows = session.execute(
-        select(AwardCategory, finalist_count, document_count).order_by(AwardCategory.name)
-    )
+    query = select(AwardCategory, finalist_count, document_count).order_by(AwardCategory.name)
+    if not include_hidden:
+        query = query.where(AwardCategory.hidden_at.is_(None))
+    rows = session.execute(query)
     return [
         CategoryOut.model_validate(c).model_copy(update={"finalist_count": f, "document_count": d})
         for c, f, d in rows
@@ -143,6 +153,27 @@ def create_category(body: CategoryCreate, session: SessionDep, user: Coordinator
         session.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "a category with this code exists") from exc
     session.refresh(category)
+    return CategoryOut.model_validate(category)
+
+
+@router.put("/categories/{category_id}/visibility")
+def set_category_visibility(
+    category_id: uuid.UUID, body: CategoryVisibilityIn, session: SessionDep, admin: Admin
+) -> CategoryOut:
+    """Hide a category from lists, the dashboard and the judges' pack, or show it again. Nothing
+    in it changes; it stays reachable by its link."""
+    category = _get_category(session, category_id)
+    if body.hidden != (category.hidden_at is not None):
+        category.hidden_at = datetime.now(UTC) if body.hidden else None
+        audit.record(
+            session,
+            admin,
+            "category.hidden" if body.hidden else "category.shown",
+            "award_category",
+            category.id,
+            code=category.code,
+        )
+        session.commit()
     return CategoryOut.model_validate(category)
 
 
@@ -214,6 +245,91 @@ def get_finalist(
     return _finalist_out(fc, count)
 
 
+# --- Reference notes ---------------------------------------------------------------------------
+
+
+def _reference_notes(session: Session, fc: FinalistCategory) -> list[ReferenceNoteOut]:
+    rows = session.execute(
+        select(ReferenceNote, User.display_name)
+        .outerjoin(User, User.id == ReferenceNote.updated_by)
+        .where(ReferenceNote.finalist_category_id == fc.id)
+        .order_by(ReferenceNote.position)
+    ).all()
+    return [
+        ReferenceNoteOut(
+            position=note.position,
+            referee_name=note.referee_name,
+            notes=note.notes,
+            updated_at=note.updated_at,
+            updated_by=name,
+        )
+        for note, name in rows
+    ]
+
+
+@router.get("/categories/{category_id}/finalists/{finalist_id}/reference-notes")
+def list_reference_notes(
+    category_id: uuid.UUID, finalist_id: uuid.UUID, session: SessionDep, _: CurrentUser
+) -> list[ReferenceNoteOut]:
+    """What the finalist's references said, as recorded by a coordinator."""
+    return _reference_notes(session, _get_finalist_category(session, category_id, finalist_id))
+
+
+@router.put("/categories/{category_id}/finalists/{finalist_id}/reference-notes")
+def save_reference_notes(
+    category_id: uuid.UUID,
+    finalist_id: uuid.UUID,
+    body: ReferenceNotesIn,
+    session: SessionDep,
+    user: Coordinator,
+) -> list[ReferenceNoteOut]:
+    """Replace the finalist's reference notes (up to four, in order)."""
+    fc = _get_finalist_category(session, category_id, finalist_id)
+    if consent.withdrawn(session, fc.id, consent.Purpose.ASSESSMENT):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "the finalist has withdrawn consent to assessment (part A)"
+        )
+    existing = {
+        n.position: n
+        for n in session.scalars(
+            select(ReferenceNote).where(ReferenceNote.finalist_category_id == fc.id)
+        )
+    }
+    now = datetime.now(UTC)
+    for position, item in enumerate(body.notes, start=1):
+        name, text_ = item.referee_name.strip(), item.notes.strip()
+        if not name or not text_:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "each reference needs a name and notes"
+            )
+        note = existing.pop(position, None)
+        if note is None:
+            session.add(
+                ReferenceNote(
+                    finalist_category_id=fc.id,
+                    position=position,
+                    referee_name=name,
+                    notes=text_,
+                    updated_by=user.id,
+                )
+            )
+        elif (note.referee_name, note.notes) != (name, text_):
+            note.referee_name, note.notes = name, text_
+            note.updated_by, note.updated_at = user.id, now
+    for note in existing.values():
+        session.delete(note)
+    audit.record(
+        session,
+        user,
+        "reference_notes.saved",
+        "finalist_category",
+        fc.id,
+        references=len(body.notes),
+    )
+    session.commit()
+    return _reference_notes(session, fc)
+
+
 # --- Documents ---------------------------------------------------------------------------------
 
 
@@ -243,7 +359,7 @@ def upload_documents(
     files: Annotated[list[UploadFile], File(description="PDF, DOCX, XLSX, PNG, JPG or ZIP")],
     idempotency_key: Annotated[str, Header(min_length=8, max_length=200)],
     session: SessionDep,
-    storage: Annotated[FileStorage, Depends(get_storage)],
+    storage: Annotated[LocalStorage, Depends(get_storage)],
     settings: Annotated[Settings, Depends(get_settings)],
     user: Coordinator,
     response: Response,
@@ -315,7 +431,7 @@ def _get_document(session: Session, document_id: uuid.UUID) -> Document:
 def download_document(
     document_id: uuid.UUID,
     session: SessionDep,
-    storage: Annotated[FileStorage, Depends(get_storage)],
+    storage: Annotated[LocalStorage, Depends(get_storage)],
     user: CurrentUser,
 ) -> Response:
     document = _get_document(session, document_id)

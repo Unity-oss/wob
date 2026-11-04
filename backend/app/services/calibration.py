@@ -19,15 +19,14 @@ from app.models import (
     CalibrationStudy,
     CriterionAssessment,
     JobStatus,
-    Role,
     RubricCriterion,
     RubricVersion,
     User,
 )
+from app.security.permissions import Permission, roles_with
 from app.services import audit
 from app.services.calibration_metrics import Agreement, Thresholds, agreement, verdict
-
-RATER_ROLES = (Role.ADMIN, Role.COMMITTEE, Role.JUDGE, Role.REVIEWER)
+from app.services.scales import scale_of
 
 
 class CalibrationError(ValueError):
@@ -86,11 +85,12 @@ def create_study(
     raters = session.scalars(select(User).where(User.id.in_(rater_ids))).all()
     if len(raters) != len(set(rater_ids)) or not raters:
         raise CalibrationError("choose at least one rater; every rater must be an existing user")
+    rater_roles = roles_with(session, Permission.RATE_CALIBRATION)
     for rater in raters:
-        if not rater.is_active or rater.role not in RATER_ROLES:
+        if not rater.is_active or rater.role not in rater_roles:
             raise CalibrationError(
-                f"{rater.display_name} cannot rate: needs an active "
-                "committee, judge, reviewer or admin account"
+                f"{rater.display_name} cannot rate: needs an active account in a user group "
+                "allowed to rate in calibration studies"
             )
 
     assessed = session.execute(
@@ -153,6 +153,9 @@ def rate(
     notes: str | None,
 ) -> CalibrationRating:
     _rater(session, study, user)
+    scale = scale_of(session.get_one(RubricVersion, study.rubric_version_id).scale)
+    if not scale.contains(rating):
+        raise CalibrationError(f"ratings are whole numbers from {scale.low} to {scale.high}")
     item = session.get(CalibrationItem, item_id)
     if item is None or item.study_id != study.id:
         raise CalibrationError("item not in this study")
@@ -217,13 +220,16 @@ def compute(session: Session, study: CalibrationStudy) -> dict:
             )
         )
     }
-    criteria = {c.id: c.name for c in session.get(RubricVersion, study.rubric_version_id).criteria}
+    rubric = session.get_one(RubricVersion, study.rubric_version_id)
+    criteria = {c.id: c.name for c in rubric.criteria}
+    levels = range(scale_of(rubric.scale).low, scale_of(rubric.scale).high + 1)
     thresholds = Thresholds(**study.thresholds)
 
     def measure(subset: list[CalibrationItem]) -> Agreement:
         return agreement(
             [ai[(i.finalist_category_id, i.criterion_id)] for i in subset],
             {str(u): [ratings.get((i.id, u)) for i in subset] for u in completed},
+            levels,
         )
 
     overall = measure(items)

@@ -19,6 +19,7 @@ from app.services.claims.llm import (
     request_options,
 )
 from app.services.research.schema import ResearchOutput
+from app.services.tracing import tag_model, trace_llm, usage_metadata
 
 
 @dataclass
@@ -108,8 +109,17 @@ class AnthropicResearchLLM:
             },
         ]
 
+    @trace_llm(
+        "claude research",
+        lambda result: {
+            "usage_metadata": usage_metadata(result.usage),
+            "searches": result.searches,
+            "pages_fetched": len(result.pages),
+        },
+    )
     def research(self, system: str, user: str) -> ResearchResult:
         s = self._settings
+        tag_model(self.model_id.split(":", 1)[0], s.llm_model)
         messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
         pages: list[FetchedPage] = []
         served_by: list[str] = []
@@ -139,7 +149,12 @@ class AnthropicResearchLLM:
 
             if message.model not in served_by:
                 served_by.append(message.model)
-            for key in ("input_tokens", "output_tokens"):
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ):
                 usage[key] = usage.get(key, 0) + (getattr(message.usage, key, 0) or 0)
             for block in message.content:
                 if block.type == "web_fetch_tool_result":

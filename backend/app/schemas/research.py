@@ -51,6 +51,7 @@ class SourceOut(BaseModel):
     identity_confirmed: bool
     credibility: QualityLevel | None
     reviewer_outcome: ReviewOutcome
+    auto_accepted: bool
     reviewed_by: str | None
     reviewed_at: datetime | None
     review_notes: str | None

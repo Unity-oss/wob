@@ -27,15 +27,17 @@ from app.models import (
     Finalist,
     FinalistCategory,
     FinalistConsent,
+    JudgeScore,
     RankingEntry,
     RankingSnapshot,
+    ReferenceNote,
     Report,
     ReportKind,
     RubricCriterion,
     User,
     VerificationReview,
 )
-from app.services.storage import FileStorage
+from app.services.storage import LocalStorage
 
 README = """Personal data held about you by the Women on Boards Awards 2026 evidence system
 
@@ -65,7 +67,7 @@ def _iso(value: Any) -> Any:
 
 
 def build_export(
-    session: Session, storage: FileStorage, finalist_category_id: uuid.UUID
+    session: Session, storage: LocalStorage, finalist_category_id: uuid.UUID
 ) -> tuple[bytes, str]:
     fc = session.get_one(FinalistCategory, finalist_category_id)
     finalist = session.get_one(Finalist, fc.finalist_id)
@@ -114,7 +116,7 @@ def build_export(
                     {
                         "decision": r.decision.value,
                         "notes": r.notes,
-                        "by_role": roles.get(r.reviewer_id),
+                        "by_role": roles.get(r.reviewer_id) if r.reviewer_id else "automatic",
                         "at": _iso(r.created_at),
                     }
                     for r in reviews
@@ -242,6 +244,28 @@ def build_export(
             "eligibility_flagged": fc.eligibility_flagged,
         },
         "consents": consents,
+        "reference_notes": [
+            {"referee": r.referee_name, "notes": r.notes, "recorded_at": _iso(r.updated_at)}
+            for r in session.scalars(
+                select(ReferenceNote)
+                .where(ReferenceNote.finalist_category_id == fc.id)
+                .order_by(ReferenceNote.position)
+            )
+        ],
+        # Judges are identified by role only, like other people in this export.
+        "judge_scores": [
+            {
+                "by_role": "judge",
+                "score": s.score,
+                "comment": s.comment,
+                "recorded_at": _iso(s.updated_at),
+            }
+            for s in session.scalars(
+                select(JudgeScore)
+                .where(JudgeScore.finalist_category_id == fc.id)
+                .order_by(JudgeScore.created_at)
+            )
+        ],
         "documents": [
             {
                 "filename": d.filename,

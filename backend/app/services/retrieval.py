@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.services.embeddings import Embedder, get_embedder
 from app.services.reranking import Reranker, get_reranker
+from app.services.tracing import trace_job
 
 RETRIEVAL_VERSION = "retrieve-v1"
 
@@ -135,6 +136,7 @@ class Retriever:
             "top_k": s.retrieval_top_k,
         }
 
+    @trace_job("retrieval", "finalist_category_id", run_type="retriever")
     def search(
         self,
         session: Session,
