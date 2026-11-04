@@ -14,10 +14,23 @@ the two things that need to survive restarts outside the Space entirely:
 - **Files** (originals, reports) go to Cloudflare R2 instead of the local disk the droplet uses.
   See `backend/app/services/storage.py`'s `R2Storage`. Existing files were copied over once as a
   one-off migration (raw bytes, already encrypted -- not re-encrypted).
-- **Postgres** stays on the droplet (`infrastructure/deployment/`), reached over an SSH tunnel
-  through a restricted `dbtunnel` user (see `db-tunnel.sh`) rather than exposed publicly. This
-  means **the droplet needs to keep running** for the Space to have a database -- this isn't a
-  full migration off DigitalOcean, just off needing it to serve traffic directly.
+- **Postgres** moved to `wob_awards`, a new dedicated database on `AI-Postgre`
+  (143.198.183.46), the shared Postgres+Valkey droplet other projects (e.g. `grant_prospector`)
+  already use -- not a new database service, and not the droplet's own Postgres container either.
+  The droplet's data was dumped (plain-SQL, not custom-format: the droplet runs pg17, AI-Postgre
+  runs pg16, and pg17's custom-format dumps aren't readable by pg16's `pg_restore`) and restored
+  once; the droplet's own Postgres container is no longer used by this Space and can eventually be
+  dropped from `infrastructure/deployment/compose.yaml`.
+  **Reached directly over its public IP, not a private/VPC address** (`DB_HOST`/`DB_PORT`
+  secrets): Hugging Face's infrastructure isn't on DigitalOcean's network, so the private IP
+  `grant_prospector` uses isn't reachable from here. AI-Postgre's own setup notes
+  (`docker-compose.db.yml` on that droplet) say port 5432 should be firewalled to the VPC CIDR
+  only and never reachable from the public internet; **it currently is reachable from the public
+  internet anyway** (confirmed by connecting to it from outside DigitalOcean entirely) --
+  pre-existing, affects every project on that droplet already, flagged rather than fixed here.
+  Fixing it (a DigitalOcean Cloud Firewall rule) would also break this Space's access to its own
+  database unless Hugging Face's egress ranges are allowed too, which isn't a fixed, documented
+  list -- worth solving deliberately rather than as a side effect of this migration.
 - **ClamAV** has no persistent volume for its signature database: `freshclam` re-downloads it on
   every container start (`supervisord.conf`'s `clamav` program). Adds roughly a minute to cold
   start; no stale definitions ever ship.
@@ -48,9 +61,9 @@ The actual current frontend source most likely only exists on whichever machine 
 
 | Name | Value |
 |---|---|
-| `DATABASE_URL` | `postgresql+psycopg://wob:<POSTGRES_PASSWORD>@127.0.0.1:5432/wob` (the tunnel makes the droplet's DB look local) |
-| `DB_TUNNEL_HOST` | the droplet's IP |
-| `DB_TUNNEL_SSH_KEY` | the `dbtunnel` user's private key (whole file, including `-----BEGIN...` lines) |
+| `DATABASE_URL` | `postgresql+psycopg://wob_awards_app:<password>@143.198.183.46:5432/wob_awards` |
+| `DB_HOST` | `143.198.183.46` (read by `supervisord.conf` to wait for Postgres before starting api/worker) |
+| `DB_PORT` | `5432` |
 | `SECRET_KEY`, `FILE_ENCRYPTION_KEYS` | same values as the droplet's `/etc/wob/env` |
 | `STORAGE_BACKEND` | `r2` |
 | `R2_BUCKET`, `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | from the Cloudflare R2 API token |
@@ -67,7 +80,7 @@ to its root:
 
 ```
 git clone https://huggingface.co/spaces/<org>/<name> wob-space
-cp infrastructure/hf/{Dockerfile,clamd.conf,freshclam.conf,supervisord.conf,db-tunnel.sh,wait-for.sh} wob-space/
+cp infrastructure/hf/{Dockerfile,clamd.conf,freshclam.conf,supervisord.conf,wait-for.sh} wob-space/
 cp -r infrastructure/hf/frontend-dist wob-space/
 cp infrastructure/hf/SPACE_README.md wob-space/README.md
 cd wob-space && git add -A && git commit -m "Deploy" && git push
@@ -83,10 +96,13 @@ mkdir -p infrastructure/hf/frontend-dist && tar -xzf frontend-next.tar.gz -C inf
 
 The `Dockerfile` pulls the actual application source (`backend/`, `frontend/`) from
 `SOURCE_REPO`/`SOURCE_REF` at build time rather than duplicating it here, so the Space always
-builds from a real commit of the app instead of a second, driftable copy. It currently points at
-this branch on a fork (`deploy/hf-migration-r2-storage`, see the open PR) -- once merged, update
-the `ARG SOURCE_REPO`/`ARG SOURCE_REF` defaults at the top of `Dockerfile` to
-`samuelmugisha/wob`/`main`, or override them as Space build args.
+builds from a real commit of the app instead of a second, driftable copy. `SOURCE_REF` must be a
+commit SHA, not a branch name -- see the comment above it in `Dockerfile` for why (Docker's build
+cache silently keeps the first commit it ever saw otherwise, so bumping it is how you make a
+rebuild actually pick up new commits). It currently points at a commit on a fork
+(`deploy/hf-migration-r2-storage`, see the open PR) -- once merged, update the `ARG SOURCE_REPO`
+default to `https://github.com/samuelmugisha/wob.git` and `ARG SOURCE_REF` to the merge commit's
+SHA, or override both as Space build args.
 
 ## Known gaps / not yet done here
 
@@ -94,8 +110,10 @@ the `ARG SOURCE_REPO`/`ARG SOURCE_REF` defaults at the top of `Dockerfile` to
   against a real R2 bucket inside this app end-to-end -- only the one-off raw-byte migration of
   existing files has been verified against the real bucket.
 - No smoke test of the full combined container has been run yet (build + boot + login + upload).
-- If the droplet is ever decommissioned, the database needs to move somewhere durable first (a
-  managed Postgres with pgvector) -- this setup assumes it keeps running.
+- AI-Postgre's port 5432 being open to the public internet (see above) predates this migration
+  and affects other projects on that droplet too -- worth a deliberate fix (Cloud Firewall rule
+  scoped to Hugging Face's egress, or moving this specific database behind its own auth proxy),
+  not something to half-fix as a side effect of this change.
 - The real frontend source (see above) needs to be found and committed; until then,
   `frontend-dist/.next` is a snapshot that silently goes stale the next time anyone changes the
   frontend and deploys it to the droplet without also regenerating this directory.
