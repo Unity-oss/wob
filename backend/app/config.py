@@ -47,7 +47,14 @@ class Settings(BaseSettings):
 
     # File storage, encrypted at rest (spec §3, §12): "id:base64key,..." of 32-byte keys, kept
     # outside the database and storage. New files use the active key; older ids still decrypt.
+    storage_backend: Literal["local", "r2"] = "local"
     storage_dir: Path = BACKEND_DIR / "var" / "storage"
+    # Cloudflare R2 (S3-compatible); only read when storage_backend is "r2".
+    r2_bucket: str | None = None
+    r2_endpoint_url: str | None = None  # https://<account_id>.r2.cloudflarestorage.com
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: SecretStr | None = None
+    r2_prefix: str = ""
     file_encryption_keys: SecretStr | None = None
     file_encryption_active_key: str | None = None
     # Only for throwaway local experiments; never in a deployment.

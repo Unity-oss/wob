@@ -29,7 +29,7 @@ from app.services.calibration import is_blinded
 from app.services.http import attachment
 from app.services.reports.data import gather
 from app.services.reports.pdf import GENERATOR_VERSION, render_category, render_individual
-from app.services.storage import LocalStorage, get_storage
+from app.services.storage import FileStorage, get_storage
 
 router = APIRouter(prefix="/api/v1", tags=["reports"])
 log = logging.getLogger("wob.reports")
@@ -76,7 +76,7 @@ def _out(session: Session, report: Report) -> ReportOut:
 def create_report(
     body: ReportIn,
     session: SessionDep,
-    storage: Annotated[LocalStorage, Depends(get_storage)],
+    storage: Annotated[FileStorage, Depends(get_storage)],
     user: ReportAuthor,
 ) -> ReportOut:
     """Generate an individual or category PDF from a ranking snapshot."""
@@ -185,7 +185,7 @@ def get_report(report_id: uuid.UUID, session: SessionDep, _: CurrentUser) -> Rep
 def download_report(
     report_id: uuid.UUID,
     session: SessionDep,
-    storage: Annotated[LocalStorage, Depends(get_storage)],
+    storage: Annotated[FileStorage, Depends(get_storage)],
     user: CurrentUser,
 ) -> Response:
     report = _get_report(session, report_id)

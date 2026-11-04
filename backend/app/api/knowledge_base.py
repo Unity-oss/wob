@@ -56,7 +56,7 @@ from app.services.citations import Citation, verify_citations
 from app.services.documents import Upload, store_uploads, withdraw_document
 from app.services.http import attachment
 from app.services.retrieval import criterion_query, get_retriever
-from app.services.storage import LocalStorage, get_storage
+from app.services.storage import FileStorage, get_storage
 
 router = APIRouter(prefix="/api/v1", tags=["knowledge base"])
 
@@ -243,7 +243,7 @@ def upload_documents(
     files: Annotated[list[UploadFile], File(description="PDF, DOCX, XLSX, PNG, JPG or ZIP")],
     idempotency_key: Annotated[str, Header(min_length=8, max_length=200)],
     session: SessionDep,
-    storage: Annotated[LocalStorage, Depends(get_storage)],
+    storage: Annotated[FileStorage, Depends(get_storage)],
     settings: Annotated[Settings, Depends(get_settings)],
     user: Coordinator,
     response: Response,
@@ -315,7 +315,7 @@ def _get_document(session: Session, document_id: uuid.UUID) -> Document:
 def download_document(
     document_id: uuid.UUID,
     session: SessionDep,
-    storage: Annotated[LocalStorage, Depends(get_storage)],
+    storage: Annotated[FileStorage, Depends(get_storage)],
     user: CurrentUser,
 ) -> Response:
     document = _get_document(session, document_id)
